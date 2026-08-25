@@ -1,0 +1,211 @@
+// hyco_pml_laude_param_fast.edp
+load "msh3"
+
+// ========== parámetros ajustables ==========
+real A1 = 0.1;
+real A2 = 0.2;
+real omega1 = 10.0;
+string outputTag = "A1_0.1_A2_0.2_om1_10";
+
+// ========== parámetros fijos (malla reducida) ==========
+real Lx = 40.0, Ly = 5.0;
+int Nguides = 20;
+real DX = 3.0, dintra = 1.6, dinter = 1.4;
+real omega2 = 2.0 * omega1;
+real Zmax = 8.0 * pi / omega1;   // 4 ciclos
+real dZ = 0.05;                  // Paso más grande
+real Vdepth = 13.0, w = 0.5;
+real eta = 1.0;
+
+// PML y malla reducida
+real k0 = 1.0;
+int Nx = 100, Ny = 20;           // Malla pequeña
+real PMLthick = 2.0, PMLstrength = 15.0;
+real xmin = -4.0 - PMLthick, xmax = -4.0 + Lx + PMLthick;
+real ymin = -Ly/2.0 - PMLthick, ymax = Ly/2.0 + PMLthick;
+mesh Th = square(Nx, Ny, [xmin + (xmax-xmin)*x, ymin + (ymax-ymin)*y]);
+cerr << "Mesh created (" << Nx << "x" << Ny << ")." << endl;
+
+fespace Vh(Th, P1);
+Vh psiR, psiI, psiOldR, psiOldI, Vr, vR, vI;
+
+func real Vwg(real X, real Y, real Xc) {
+    return -Vdepth * exp(-((X-Xc)^2+Y^2)/(w^2));
+}
+
+func real sigmaX(real X) {
+    if (X < xmin + PMLthick) return PMLstrength * ((xmin + PMLthick - X)/PMLthick)^2;
+    if (X > xmax - PMLthick) return PMLstrength * ((X - (xmax - PMLthick))/PMLthick)^2;
+    return 0.0;
+}
+func real sigmaY(real Y) {
+    if (Y < ymin + PMLthick) return PMLstrength * ((ymin + PMLthick - Y)/PMLthick)^2;
+    if (Y > ymax - PMLthick) return PMLstrength * ((Y - (ymax - PMLthick))/PMLthick)^2;
+    return 0.0;
+}
+
+real sx = sigmaX(x)/k0;
+real sy = sigmaY(y)/k0;
+real denX = (1.0 + sx*sx)^2;
+real denY = (1.0 + sy*sy)^2;
+real Ax = (1.0 - sx*sx) / denX;
+real Bx = -2.0 * sx / denX;
+real Ay = (1.0 - sy*sy) / denY;
+real By = -2.0 * sy / denY;
+
+func real Xbase(int n) {
+    int j = (n+1)/2;
+    if (n % 2 == 1) return (j-1)*DX;
+    else return (j-1)*DX + dintra;
+}
+func real Xguide(int n, real Z) {
+    real Xc = Xbase(n);
+    if (n % 2 == 0) Xc += A1*sin(omega1*Z);
+    else            Xc += A2*sin(omega2*Z);
+    return Xc;
+}
+func real Xdot(int n, real Z) {
+    if (n % 2 == 0) return A1 * omega1 * cos(omega1*Z);
+    else            return A2 * omega2 * cos(omega2*Z);
+}
+
+func real a0Gauss(real X, real Y) { return exp(-(X^2 + Y^2)/(w^2)); }
+
+// Inicialización
+cerr << "Setting initial condition..." << endl;
+real Xc1 = Xguide(1, 0.0);
+real Xd1 = Xdot(1, 0.0);
+{
+    Vh tmpMode = a0Gauss(x - Xc1, y);
+    real nrm = sqrt(int2d(Th)(tmpMode^2));
+    tmpMode = tmpMode / nrm;
+    psiOldR = tmpMode * cos(eta * Xd1 * (x - Xc1));
+    psiOldI = tmpMode * sin(eta * Xd1 * (x - Xc1));
+    real normInit = sqrt(int2d(Th)(psiOldR^2 + psiOldI^2));
+    psiOldR = psiOldR / normInit;
+    psiOldI = psiOldI / normInit;
+}
+
+string datName = "overlap_data_" + outputTag + ".dat";
+ofstream foverlap(datName);
+foverlap.precision(12);
+int steps = int(Zmax / dZ);
+int saveInterval = 2;
+
+// Volcado inicial (Z=0)
+{
+    real Z = 0.0;
+    real normRenorm0 = sqrt(int2d(Th)(psiOldR^2 + psiOldI^2));
+    psiOldR = psiOldR / normRenorm0;
+    psiOldI = psiOldI / normRenorm0;
+    real normPsi2 = int2d(Th)(psiOldR^2 + psiOldI^2);
+    real[int,int] S(Nguides,Nguides);
+    real[int] uR(Nguides), uI(Nguides);
+    Vh[int] modes0(Nguides);
+    real[int] Xc0(Nguides), Xd0(Nguides);
+    for (int n=1; n<=Nguides; n++) {
+        Xc0[n-1] = Xguide(n, Z);
+        Xd0[n-1] = Xdot(n, Z);
+        Vh tmpMode = a0Gauss(x - Xc0[n-1], y);
+        real nrm = sqrt(int2d(Th)(tmpMode^2));
+        modes0[n-1] = tmpMode / nrm;
+    }
+    for (int n=1; n<=Nguides; n++) {
+        uR[n-1] = int2d(Th)( (psiOldR*cos(-eta * Xd0[n-1] * (x - Xc0[n-1])) - psiOldI*sin(-eta * Xd0[n-1] * (x - Xc0[n-1]))) * modes0[n-1] );
+        uI[n-1] = int2d(Th)( (psiOldR*sin(-eta * Xd0[n-1] * (x - Xc0[n-1])) + psiOldI*cos(-eta * Xd0[n-1] * (x - Xc0[n-1]))) * modes0[n-1] );
+        for (int m=1; m<=Nguides; m++) {
+            real Xcm = Xguide(m, Z);
+            real Xdm = Xdot(m, Z);
+            S(n-1,m-1) = int2d(Th)( modes0[n-1] * modes0[m-1] * cos( eta * (Xdm*(x-Xcm) - Xd0[n-1]*(x-Xc0[n-1])) ) );
+        }
+    }
+    foverlap << Z << " " << normPsi2 << " " << Nguides << endl;
+    for (int n=0; n<Nguides; n++) {
+        for (int m=0; m<Nguides; m++) foverlap << S(n,m) << " ";
+    }
+    foverlap << endl;
+    for (int n=0; n<Nguides; n++) foverlap << uR[n] << " ";
+    foverlap << endl;
+    for (int n=0; n<Nguides; n++) foverlap << uI[n] << " ";
+    foverlap << endl;
+    foverlap.flush;
+    cerr << "Z=0 saved." << endl;
+}
+
+// Bucle de propagación
+cerr << "Total steps: " << steps << endl;
+for (int k=0; k<steps; k++) {
+    real Z = k*dZ;
+    real Zmid = Z + dZ/2.0;
+    Vr = 0.0;
+    for (int n=1; n<=Nguides; n++) Vr = Vr + Vwg(x, y, Xguide(n, Zmid));
+
+    solve CN([psiR, psiI], [vR, vI]) =
+        int2d(Th)( psiR*vR + psiI*vI )
+      + int2d(Th)( (dZ/2) * (
+            -0.5 * (Bx * dx(psiR) + Ax * dx(psiI)) * dx(vR)
+            -0.5 * (By * dy(psiR) + Ay * dy(psiI)) * dy(vR)
+            + Vr * psiI * vR
+        ) )
+      + int2d(Th)( (dZ/2) * (
+             0.5 * (Ax * dx(psiR) - Bx * dx(psiI)) * dx(vI)
+            +0.5 * (Ay * dy(psiR) - By * dy(psiI)) * dy(vI)
+            - Vr * psiR * vI
+        ) )
+        - int2d(Th)( psiOldR*vR + psiOldI*vI )
+        - int2d(Th)( (dZ/2) * (
+               0.5 * (Bx * dx(psiOldR) + Ax * dx(psiOldI)) * dx(vR)
+              +0.5 * (By * dy(psiOldR) + Ay * dy(psiOldI)) * dy(vR)
+              - Vr * psiOldI * vR
+          ) )
+        - int2d(Th)( (dZ/2) * (
+              -0.5 * (Ax * dx(psiOldR) - Bx * dx(psiOldI)) * dx(vI)
+              -0.5 * (Ay * dy(psiOldR) - By * dy(psiOldI)) * dy(vI)
+              + Vr * psiOldR * vI
+          ) )
+        + on(1,2,3,4, psiR=0, psiI=0);
+
+    psiOldR = psiR;
+    psiOldI = psiI;
+
+    // Guardar .dat cada 2 pasos
+    if ((k+1) % saveInterval == 0 || k == steps-1) {
+        real Zsave = (k+1)*dZ;
+        real normRenorm = sqrt(int2d(Th)(psiR^2 + psiI^2));
+        psiR = psiR / normRenorm;
+        psiI = psiI / normRenorm;
+        real normPsi2 = int2d(Th)(psiR^2 + psiI^2);
+        real[int,int] S(Nguides,Nguides);
+        real[int] uR(Nguides), uI(Nguides);
+        Vh[int] modesSave(Nguides);
+        real[int] XcSave(Nguides), XdSave(Nguides);
+        for (int n=1; n<=Nguides; n++) {
+            XcSave[n-1] = Xguide(n, Zmid);
+            XdSave[n-1] = Xdot(n, Zmid);
+            Vh tmpMode = a0Gauss(x - XcSave[n-1], y);
+            real nrm = sqrt(int2d(Th)(tmpMode^2));
+            modesSave[n-1] = tmpMode / nrm;
+        }
+        for (int n=1; n<=Nguides; n++) {
+            uR[n-1] = int2d(Th)( (psiR*cos(-eta * XdSave[n-1] * (x - XcSave[n-1])) - psiI*sin(-eta * XdSave[n-1] * (x - XcSave[n-1]))) * modesSave[n-1] );
+            uI[n-1] = int2d(Th)( (psiR*sin(-eta * XdSave[n-1] * (x - XcSave[n-1])) + psiI*cos(-eta * XdSave[n-1] * (x - XcSave[n-1]))) * modesSave[n-1] );
+            for (int m=1; m<=Nguides; m++) {
+                real Xcm = Xguide(m, Zmid);
+                real Xdm = Xdot(m, Zmid);
+                S(n-1,m-1) = int2d(Th)( modesSave[n-1] * modesSave[m-1] * cos( eta * (Xdm*(x-Xcm) - XdSave[n-1]*(x-XcSave[n-1])) ) );
+            }
+        }
+        foverlap << Zsave << " " << normPsi2 << " " << Nguides << endl;
+        for (int n=0; n<Nguides; n++) {
+            for (int m=0; m<Nguides; m++) foverlap << S(n,m) << " ";
+        }
+        foverlap << endl;
+        for (int n=0; n<Nguides; n++) foverlap << uR[n] << " ";
+        foverlap << endl;
+        for (int n=0; n<Nguides; n++) foverlap << uI[n] << " ";
+        foverlap << endl;
+        foverlap.flush;
+        cerr << "Progress: " << (k+1) << "/" << steps << " (Z=" << Zsave << ")" << endl;
+    }
+}
+cerr << "Simulation completed. Data saved in: " << datName << endl;
